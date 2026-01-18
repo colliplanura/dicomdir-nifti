@@ -1,6 +1,6 @@
 import os
+import json
 import time
-import csv
 import hashlib
 import logging
 from collections import defaultdict
@@ -8,7 +8,6 @@ from collections import defaultdict
 import pydicom
 import SimpleITK as sitk
 import nibabel as nib
-import numpy as np
 import pandas as pd
 
 
@@ -21,6 +20,12 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger("NEURO_PIPELINE")
+
+
+# ======================================================
+# CONFIG
+# ======================================================
+PROGRESS_FILE = "progress.json"
 
 
 # ======================================================
@@ -47,11 +52,20 @@ def is_dicom(path):
 
 
 # ======================================================
-# DESCOBERTA DE DICOM
+# DISCOVERY
 # ======================================================
-def find_dicom_files(root):
-    files = []
+def find_dicomdirs(root):
+    dicomdirs = []
     for r, _, fs in os.walk(root):
+        for f in fs:
+            if f.upper() == "DICOMDIR":
+                dicomdirs.append(os.path.join(r, f))
+    return sorted(dicomdirs)
+
+
+def find_dicom_files(base_dir):
+    files = []
+    for r, _, fs in os.walk(base_dir):
         for f in fs:
             p = os.path.join(r, f)
             if f.upper() != "DICOMDIR" and is_dicom(p):
@@ -60,7 +74,7 @@ def find_dicom_files(root):
 
 
 # ======================================================
-# FILTRAGEM DE SÉRIES NÃO VOLUMÉTRICAS
+# FILTROS CLÍNICOS
 # ======================================================
 def is_valid_volume(dcm):
     desc = getattr(dcm, "SeriesDescription", "").upper()
@@ -78,77 +92,54 @@ def is_valid_volume(dcm):
 
 
 # ======================================================
-# VALIDAÇÃO DE DIMENSÕES
-# ======================================================
-def get_image_dimensions(dicom_path):
-    """Retorna as dimensões (linhas, colunas) de uma imagem DICOM."""
-    try:
-        dcm = pydicom.dcmread(dicom_path, stop_before_pixels=True)
-        rows = int(getattr(dcm, "Rows", 0))
-        cols = int(getattr(dcm, "Columns", 0))
-        return (rows, cols)
-    except Exception:
-        return None
-
-
-def filter_consistent_dimensions(files):
-    """Filtra arquivos mantendo apenas aqueles com a dimensão mais comum."""
-    dimensions_count = defaultdict(list)
-    
-    for f in files:
-        dims = get_image_dimensions(f)
-        if dims:
-            dimensions_count[dims].append(f)
-    
-    if not dimensions_count:
-        return files, None
-    
-    # Encontra a dimensão mais comum
-    most_common_dim = max(dimensions_count.keys(), key=lambda d: len(dimensions_count[d]))
-    filtered_files = dimensions_count[most_common_dim]
-    
-    removed_count = len(files) - len(filtered_files)
-    
-    return filtered_files, (removed_count, most_common_dim)
-
-
-# ======================================================
-# CONVERSÃO ROBUSTA DICOM → NIFTI
+# CONVERSÃO ROBUSTA
 # ======================================================
 def dicom_series_to_nifti(files):
     reader = sitk.ImageSeriesReader()
     reader.SetFileNames(files)
     img = reader.Execute()
 
-    # Forçar consistência científica
     img = sitk.Cast(img, sitk.sitkInt16)
 
-    spacing = img.GetSpacing()
-    origin = img.GetOrigin()
-    direction = img.GetDirection()
-
     fixed = sitk.Image(img)
-    fixed.SetSpacing(spacing)
-    fixed.SetOrigin(origin)
-    fixed.SetDirection(direction)
+    fixed.SetSpacing(img.GetSpacing())
+    fixed.SetOrigin(img.GetOrigin())
+    fixed.SetDirection(img.GetDirection())
 
     return fixed
 
 
 # ======================================================
-# PIPELINE PRINCIPAL
+# CHECKPOINT
 # ======================================================
-def run_pipeline(root_dir, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    csv_path = os.path.join(output_dir, "metadata.csv")
+def load_progress(output_dir):
+    path = os.path.join(output_dir, PROGRESS_FILE)
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {"completed": []}
 
-    dicoms = find_dicom_files(root_dir)
-    log.info(f"📁 DICOMs encontrados: {len(dicoms)}")
+
+def save_progress(output_dir, progress):
+    path = os.path.join(output_dir, PROGRESS_FILE)
+    with open(path, "w") as f:
+        json.dump(progress, f, indent=2)
+
+
+# ======================================================
+# PROCESSA UM DICOMDIR
+# ======================================================
+def process_dicomdir(dicomdir, output_dir, metadata_rows):
+    base_dir = os.path.dirname(dicomdir)
+    log.info(f"📂 Processando DICOMDIR: {dicomdir}")
+
+    files = find_dicom_files(base_dir)
+    log.info(f"📁 DICOMs encontrados: {len(files)}")
 
     series = defaultdict(list)
     meta = {}
 
-    for f in dicoms:
+    for f in files:
         try:
             dcm = pydicom.dcmread(f, stop_before_pixels=True)
             if not is_valid_volume(dcm):
@@ -160,32 +151,15 @@ def run_pipeline(root_dir, output_dir):
             meta[uid] = {
                 "patient_id": sanitize(getattr(dcm, "PatientID", "UNKNOWN")),
                 "modality": dcm.Modality,
-                "series_description": getattr(dcm, "SeriesDescription", ""),
                 "study_uid": dcm.StudyInstanceUID
             }
-
         except Exception:
             continue
 
-    log.info(f"🧠 Séries volumétricas válidas: {len(series)}")
+    log.info(f"🧠 Séries válidas: {len(series)}")
 
-    rows = []
-
-    for i, (uid, files) in enumerate(series.items(), 1):
+    for uid, files in series.items():
         if len(files) < 10:
-            continue
-
-        log.info(f"▶️ [{i}/{len(series)}] Série {uid} ({len(files)} imagens)")
-
-        # Filtrar imagens com dimensões consistentes
-        files, filter_info = filter_consistent_dimensions(files)
-        
-        if filter_info:
-            removed, dims = filter_info
-            log.warning(f"⚠️  {removed} imagem(ns) removida(s) por dimensões inconsistentes. Mantendo: {dims}")
-        
-        if len(files) < 10:
-            log.warning(f"⚠️  Série ignorada: menos de 10 imagens após filtragem")
             continue
 
         files.sort(
@@ -198,18 +172,14 @@ def run_pipeline(root_dir, output_dir):
 
         img = dicom_series_to_nifti(files)
 
-        name = (
-            f"{meta[uid]['patient_id']}_"
-            f"{meta[uid]['modality']}_"
-            f"{uid}.nii.gz"
-        )
-
+        name = f"{meta[uid]['patient_id']}_{meta[uid]['modality']}_{uid}.nii.gz"
         out = os.path.join(output_dir, name)
+
         sitk.WriteImage(img, out, True)
 
         nii = nib.load(out)
 
-        rows.append({
+        metadata_rows.append({
             "filename": name,
             "patient_id": meta[uid]["patient_id"],
             "modality": meta[uid]["modality"],
@@ -220,18 +190,58 @@ def run_pipeline(root_dir, output_dir):
             "sha256": sha256(out)
         })
 
-        log.info(f"✅ Salvo: {name}")
+        log.info(f"✅ Série convertida: {name}")
 
-    pd.DataFrame(rows).to_csv(csv_path, index=False)
-    log.info(f"📄 Metadados exportados: {csv_path}")
-    log.info("🏁 PIPELINE FINALIZADO COM SUCESSO")
+
+# ======================================================
+# PIPELINE PRINCIPAL (COM RESUME)
+# ======================================================
+def run_pipeline(root_dir, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+
+    progress = load_progress(output_dir)
+    completed = set(progress["completed"])
+
+    dicomdirs = find_dicomdirs(root_dir)
+    log.info(f"🔎 DICOMDIRs encontrados: {len(dicomdirs)}")
+
+    metadata_rows = []
+
+    for idx, dicomdir in enumerate(dicomdirs, 1):
+        if dicomdir in completed:
+            log.info(f"⏭️ [{idx}/{len(dicomdirs)}] Já processado — pulando")
+            continue
+
+        log.info(f"\n===== [{idx}/{len(dicomdirs)}] NOVO DICOMDIR =====")
+
+        try:
+            process_dicomdir(dicomdir, output_dir, metadata_rows)
+
+            completed.add(dicomdir)
+            progress["completed"] = list(completed)
+            save_progress(output_dir, progress)
+
+            log.info("💾 Checkpoint salvo")
+
+        except Exception as e:
+            log.error(f"❌ Erro no DICOMDIR {dicomdir}: {e}")
+            log.info("⚠️ Execução pode ser retomada depois")
+            break
+
+    # Salvar metadados finais
+    if metadata_rows:
+        csv_path = os.path.join(output_dir, "metadata.csv")
+        pd.DataFrame(metadata_rows).to_csv(csv_path, index=False)
+        log.info(f"📄 Metadados exportados: {csv_path}")
+
+    log.info("🏁 PIPELINE FINALIZADO")
 
 
 # ======================================================
 # EXECUÇÃO
 # ======================================================
 if __name__ == "__main__":
-    ROOT = r"C:\Users\F8944859\Downloads\DICOM"
-    OUT = r"C:\Users\F8944859\Downloads\NIfTI"
+    ROOT = "/content/drive/MyDrive/Medicina/Doutorado IDOR/Exames/DICOM"
+    OUT = "/content/drive/MyDrive/Medicina/Doutorado IDOR/Exames/NIfTI_PUBLICAVEL"
 
     run_pipeline(ROOT, OUT)
