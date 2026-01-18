@@ -92,6 +92,41 @@ def is_valid_volume(dcm):
 
 
 # ======================================================
+# VALIDAÇÃO DE DIMENSÕES
+# ======================================================
+def get_image_dimensions(dicom_path):
+    """Retorna as dimensões (linhas, colunas) de uma imagem DICOM."""
+    try:
+        dcm = pydicom.dcmread(dicom_path, stop_before_pixels=True)
+        rows = int(getattr(dcm, "Rows", 0))
+        cols = int(getattr(dcm, "Columns", 0))
+        return (rows, cols)
+    except Exception:
+        return None
+
+
+def filter_consistent_dimensions(files):
+    """Filtra arquivos mantendo apenas aqueles com a dimensão mais comum."""
+    dimensions_count = defaultdict(list)
+    
+    for f in files:
+        dims = get_image_dimensions(f)
+        if dims:
+            dimensions_count[dims].append(f)
+    
+    if not dimensions_count:
+        return files, None
+    
+    # Encontra a dimensão mais comum
+    most_common_dim = max(dimensions_count.keys(), key=lambda d: len(dimensions_count[d]))
+    filtered_files = dimensions_count[most_common_dim]
+    
+    removed_count = len(files) - len(filtered_files)
+    
+    return filtered_files, (removed_count, most_common_dim) if removed_count > 0 else None
+
+
+# ======================================================
 # CONVERSÃO ROBUSTA
 # ======================================================
 def dicom_series_to_nifti(files):
@@ -162,35 +197,51 @@ def process_dicomdir(dicomdir, output_dir, metadata_rows):
         if len(files) < 10:
             continue
 
-        files.sort(
-            key=lambda x: float(
-                pydicom.dcmread(
-                    x, stop_before_pixels=True
-                ).get("ImagePositionPatient", [0, 0, 0])[2]
+        try:
+            # Filtrar imagens com dimensões consistentes
+            files, filter_info = filter_consistent_dimensions(files)
+            
+            if filter_info:
+                removed, dims = filter_info
+                log.warning(f"⚠️  {removed} imagem(ns) removida(s) por dimensões inconsistentes. Mantendo: {dims}")
+            
+            if len(files) < 10:
+                log.warning(f"⚠️  Série {uid} ignorada: menos de 10 imagens após filtragem")
+                continue
+
+            files.sort(
+                key=lambda x: float(
+                    pydicom.dcmread(
+                        x, stop_before_pixels=True
+                    ).get("ImagePositionPatient", [0, 0, 0])[2]
+                )
             )
-        )
 
-        img = dicom_series_to_nifti(files)
+            img = dicom_series_to_nifti(files)
 
-        name = f"{meta[uid]['patient_id']}_{meta[uid]['modality']}_{uid}.nii.gz"
-        out = os.path.join(output_dir, name)
+            name = f"{meta[uid]['patient_id']}_{meta[uid]['modality']}_{uid}.nii.gz"
+            out = os.path.join(output_dir, name)
 
-        sitk.WriteImage(img, out, True)
+            sitk.WriteImage(img, out, True)
 
-        nii = nib.load(out)
+            nii = nib.load(out)
 
-        metadata_rows.append({
-            "filename": name,
-            "patient_id": meta[uid]["patient_id"],
-            "modality": meta[uid]["modality"],
-            "series_uid": uid,
-            "study_uid": meta[uid]["study_uid"],
-            "shape": nii.shape,
-            "spacing": nii.header.get_zooms(),
-            "sha256": sha256(out)
-        })
+            metadata_rows.append({
+                "filename": name,
+                "patient_id": meta[uid]["patient_id"],
+                "modality": meta[uid]["modality"],
+                "series_uid": uid,
+                "study_uid": meta[uid]["study_uid"],
+                "shape": nii.shape,
+                "spacing": nii.header.get_zooms(),
+                "sha256": sha256(out)
+            })
 
-        log.info(f"✅ Série convertida: {name}")
+            log.info(f"✅ Série convertida: {name}")
+        
+        except Exception as e:
+            log.error(f"❌ Erro ao processar série {uid}: {e}")
+            continue
 
 
 # ======================================================
@@ -225,8 +276,8 @@ def run_pipeline(root_dir, output_dir):
 
         except Exception as e:
             log.error(f"❌ Erro no DICOMDIR {dicomdir}: {e}")
-            log.info("⚠️ Execução pode ser retomada depois")
-            break
+            log.info("⚠️ Continuando com próximo DICOMDIR...")
+            continue
 
     # Salvar metadados finais
     if metadata_rows:
@@ -241,7 +292,7 @@ def run_pipeline(root_dir, output_dir):
 # EXECUÇÃO
 # ======================================================
 if __name__ == "__main__":
-    ROOT = "/content/drive/MyDrive/Medicina/Doutorado IDOR/Exames/DICOM"
-    OUT = "/content/drive/MyDrive/Medicina/Doutorado IDOR/Exames/NIfTI_PUBLICAVEL"
+    ROOT = r"C:\Users\F8944859\Downloads\DICOM"
+    OUT = r"C:\Users\F8944859\Downloads\NIfTI"
 
     run_pipeline(ROOT, OUT)
