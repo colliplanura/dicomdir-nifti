@@ -1,60 +1,30 @@
 #!/usr/bin/env python3
-# ======================================================
-# DICOMDIR → NIfTI PIPELINE (PRODUÇÃO / PUBLICAÇÃO)
-# ======================================================
 
 import os
-import sys
 import json
 import time
-import shutil
-import queue
 import threading
+import queue
 import subprocess
 import logging
-import hashlib
-from collections import defaultdict
-from contextlib import contextmanager
 
-import pydicom
 import SimpleITK as sitk
-import nibabel as nib
-import pandas as pd
 from tqdm import tqdm
-
-import config  # arquivo config.py externo
+import config
 
 # ======================================================
-# LOGGING
+# LOG
 # ======================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt="%H:%M:%S"
 )
-log = logging.getLogger("DICOMDIR_PIPELINE")
+log = logging.getLogger("PIPELINE")
 
 # ======================================================
-# CONTEXTO DE TEMPO
+# PROGRESS
 # ======================================================
-@contextmanager
-def timed(label):
-    start = time.time()
-    yield
-    elapsed = time.time() - start
-    log.info(f"⏱ {label}: {elapsed:.2f}s")
-
-# ======================================================
-# UTILIDADES
-# ======================================================
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def load_progress():
     if os.path.exists(config.PROGRESS_FILE):
         with open(config.PROGRESS_FILE) as f:
@@ -67,47 +37,40 @@ def load_progress():
     }
 
 
-def save_progress(progress):
+def save_progress(p):
     os.makedirs(os.path.dirname(config.PROGRESS_FILE), exist_ok=True)
     with open(config.PROGRESS_FILE, "w") as f:
-        json.dump(progress, f, indent=2)
-
+        json.dump(p, f, indent=2)
 
 # ======================================================
-# DISCOVERY REMOTO (CACHE + RETOMADA)
+# DISCOVERY REMOTO
 # ======================================================
-def list_remote_dicomdirs(progress):
+def list_dicomdirs(progress):
     if progress["listed"]:
-        log.info("📦 Usando cache local de DICOMDIRs")
         return progress["listed"]
 
     log.info("📂 Listando DICOMDIRs remotos...")
     cmd = ["rclone", "lsf", "-R", config.GDRIVE_DICOM]
-
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
 
     dicomdirs = []
     for line in proc.stdout:
-        path = line.strip()
-        if path.upper().endswith("DICOMDIR"):
-            dicomdirs.append(path)
-            print(f"\r📂 {path}", end="", flush=True)
+        p = line.strip()
+        if p.upper().endswith("DICOMDIR"):
+            dicomdirs.append(p)
+            print(f"\r📂 {p}", end="", flush=True)
 
     print()
     progress["listed"] = dicomdirs
     save_progress(progress)
-
     log.info(f"✓ {len(dicomdirs)} DICOMDIRs encontrados")
     return dicomdirs
 
-
 # ======================================================
-# DOWNLOAD (PATCH CRÍTICO)
+# DOWNLOAD (EXAME COMPLETO)
 # ======================================================
 def download_exam(remote_dicomdir, local_exam_dir):
     remote_exam_dir = os.path.dirname(remote_dicomdir)
-
-    os.makedirs(local_exam_dir, exist_ok=True)
 
     subprocess.run(
         [
@@ -115,119 +78,61 @@ def download_exam(remote_dicomdir, local_exam_dir):
             f"{config.GDRIVE_DICOM}/{remote_exam_dir}",
             local_exam_dir,
             "--ignore-existing",
-            "--checksum",
-            "--transfers", "4",
-            "--checkers", "4"
+            "--checksum"
         ],
         check=True
     )
 
-
 # ======================================================
-# DESCOBERTA LOCAL DE SÉRIES
+# CONVERSÃO
 # ======================================================
-def discover_series(local_dir):
+def convert_exam(local_exam_dir, local_nifti_dir):
     reader = sitk.ImageSeriesReader()
-    series_ids = reader.GetGDCMSeriesIDs(local_dir)
-    return series_ids or []
-
-
-# ======================================================
-# CONVERSÃO DICOM → NIFTI
-# ======================================================
-def convert_series(local_dir, series_id, out_dir):
-    reader = sitk.ImageSeriesReader()
-    files = reader.GetGDCMSeriesFileNames(local_dir, series_id)
-
-    if len(files) < config.MIN_SLICES:
-        return None
-
-    reader.SetFileNames(files)
-    img = reader.Execute()
-
-    img = sitk.Cast(img, sitk.sitkInt16)
-
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{series_id}.nii.gz")
-
-    sitk.WriteImage(img, out_path, True)
-    return out_path
-
-
-# ======================================================
-# PIPELINE DE CONVERSÃO LOCAL
-# ======================================================
-def convert_local_exam(exam_id, progress):
-    local_exam_dir = os.path.join(config.LOCAL_DICOM, exam_id)
-    out_exam_dir = os.path.join(config.LOCAL_NIFTI, exam_id)
-
-    series_ids = discover_series(local_exam_dir)
+    series_ids = reader.GetGDCMSeriesIDs(local_exam_dir)
 
     if not series_ids:
-        log.warning(f"⚠️ Nenhuma série em {exam_id}")
-        return
+        log.warning("⛔ Nenhuma série DICOM válida encontrada")
+        return False
+
+    os.makedirs(local_nifti_dir, exist_ok=True)
+    converted = False
 
     for sid in series_ids:
-        if sid in progress["converted"]:
+        files = reader.GetGDCMSeriesFileNames(local_exam_dir, sid)
+        if len(files) < config.MIN_SLICES:
             continue
 
-        with timed(f"Conversão série {sid}"):
-            out = convert_series(local_exam_dir, sid, out_exam_dir)
-            if out:
-                progress["converted"].append(sid)
-                save_progress(progress)
-                log.info(f"✅ Série convertida: {sid}")
+        reader.SetFileNames(files)
+        img = reader.Execute()
 
+        out = os.path.join(local_nifti_dir, f"{sid}.nii.gz")
+        sitk.WriteImage(img, out, True)
+
+        log.info(f"✅ Série convertida: {sid}")
+        converted = True
+
+    return converted
 
 # ======================================================
-# UPLOAD NIFTI
+# UPLOAD
 # ======================================================
-def upload_exam(exam_id):
-    local = os.path.join(config.LOCAL_NIFTI, exam_id)
-    remote = f"{config.GDRIVE_NIFTI}/{exam_id}"
+def upload_exam(local_nifti_dir, exam_id):
+    if not os.path.exists(local_nifti_dir):
+        return False
+
+    if not os.listdir(local_nifti_dir):
+        return False
 
     subprocess.run(
-        ["rclone", "copy", local, remote, "--ignore-existing"],
+        [
+            "rclone", "copy",
+            local_nifti_dir,
+            f"{config.GDRIVE_NIFTI}/{exam_id}",
+            "--ignore-existing"
+        ],
         check=True
     )
-
-
-# ======================================================
-# WORKERS
-# ======================================================
-def downloader(queue_in, progress):
-    while True:
-        item = queue_in.get()
-        if item is None:
-            break
-
-        exam_id, remote_dicomdir = item
-
-        if exam_id not in progress["downloaded"]:
-            with timed(f"Download {exam_id}"):
-                download_exam(remote_dicomdir, os.path.join(config.LOCAL_DICOM, exam_id))
-                progress["downloaded"].append(exam_id)
-                save_progress(progress)
-
-        queue_in.task_done()
-
-
-def converter(queue_in, progress):
-    while True:
-        exam_id = queue_in.get()
-        if exam_id is None:
-            break
-
-        convert_local_exam(exam_id, progress)
-
-        if exam_id not in progress["uploaded"]:
-            with timed(f"Upload {exam_id}"):
-                upload_exam(exam_id)
-                progress["uploaded"].append(exam_id)
-                save_progress(progress)
-
-        queue_in.task_done()
-
+    return True
 
 # ======================================================
 # MAIN
@@ -237,30 +142,37 @@ def run():
     os.makedirs(config.LOCAL_NIFTI, exist_ok=True)
 
     progress = load_progress()
-    dicomdirs = list_remote_dicomdirs(progress)
+    dicomdirs = list_dicomdirs(progress)
 
-    q_download = queue.Queue()
-    q_convert = queue.Queue()
+    for dcm in tqdm(dicomdirs, desc="📂 DICOMDIRs", unit="dir"):
+        exam_remote_dir = os.path.dirname(dcm)
+        exam_id = exam_remote_dir.replace("/", "_")
 
-    for i in range(config.DOWNLOAD_THREADS):
-        threading.Thread(target=downloader, args=(q_download, progress), daemon=True).start()
-
-    for i in range(config.CONVERSION_THREADS):
-        threading.Thread(target=converter, args=(q_convert, progress), daemon=True).start()
-
-    for idx, dcm in enumerate(tqdm(dicomdirs, desc="📂 DICOMDIRs", unit="dir")):
-        exam_id = str(idx)
+        local_exam_dir = os.path.join(config.LOCAL_DICOM, exam_id)
+        local_nifti_dir = os.path.join(config.LOCAL_NIFTI, exam_id)
 
         if exam_id not in progress["downloaded"]:
-            q_download.put((exam_id, dcm))
+            log.info(f"⬇️ Download exame {exam_id}")
+            download_exam(dcm, local_exam_dir)
+            progress["downloaded"].append(exam_id)
+            save_progress(progress)
 
-        q_convert.put(exam_id)
+        if exam_id not in progress["converted"]:
+            log.info(f"🧠 Convertendo exame {exam_id}")
+            ok = convert_exam(local_exam_dir, local_nifti_dir)
+            if ok:
+                progress["converted"].append(exam_id)
+                save_progress(progress)
+            else:
+                continue
 
-    q_download.join()
-    q_convert.join()
+        if exam_id not in progress["uploaded"]:
+            log.info(f"☁️ Upload exame {exam_id}")
+            if upload_exam(local_nifti_dir, exam_id):
+                progress["uploaded"].append(exam_id)
+                save_progress(progress)
 
     log.info("🏁 PIPELINE FINALIZADO")
-
 
 if __name__ == "__main__":
     run()
