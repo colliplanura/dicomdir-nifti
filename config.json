@@ -1,0 +1,17 @@
+{
+  "gdrive": {
+    "dicom_path": "gdrive:Medicina/Doutorado IDOR/Exames/DICOM",
+    "nifti_path": "gdrive:Medicina/Doutorado IDOR/Exames/NIfTI2"
+  },
+  "local": {
+    "workdir": "~/work",
+    "dicom_subdir": "dicom",
+    "nifti_subdir": "nifti",
+    "progress_file": "progress.json"
+  },
+  "processing": {
+    "min_slices": 10,
+    "download_threads": 2,
+    "conversion_threads": 2
+  }
+}

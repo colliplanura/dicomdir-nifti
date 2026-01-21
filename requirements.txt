@@ -1,0 +1,5 @@
+pydicom>=2.4.0
+SimpleITK>=2.3.0
+nibabel>=5.0.0
+pandas>=2.0.0
+tqdm>=4.66.0
