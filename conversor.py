@@ -3,8 +3,6 @@
 import os
 import json
 import time
-import threading
-import queue
 import subprocess
 import logging
 from collections import defaultdict
@@ -70,7 +68,7 @@ def list_dicomdirs(progress):
     return dicomdirs
 
 # ======================================================
-# DOWNLOAD (EXAME COMPLETO)
+# DOWNLOAD
 # ======================================================
 def download_exam(remote_dicomdir, local_exam_dir):
     remote_exam_dir = os.path.dirname(remote_dicomdir)
@@ -87,12 +85,63 @@ def download_exam(remote_dicomdir, local_exam_dir):
     )
 
 # ======================================================
+# HELPERS DICOM
+# ======================================================
+def z_position(path):
+    try:
+        ds = pydicom.dcmread(path, stop_before_pixels=True)
+        ipp = ds.get("ImagePositionPatient")
+        return float(ipp[2]) if ipp else 0.0
+    except Exception:
+        return 0.0
+
+
+def read_series_safe(files):
+    reader = sitk.ImageSeriesReader()
+    reader.SetFileNames(files)
+    try:
+        return reader.Execute()
+    except Exception:
+        log.warning("⚠️ Fallback para leitura slice-a-slice")
+        slices = []
+        for f in files:
+            try:
+                img2d = sitk.ReadImage(f)
+                slices.append(img2d)
+            except Exception:
+                continue
+
+        if not slices:
+            raise RuntimeError("Nenhuma slice válida")
+
+        img = sitk.JoinSeries(slices)
+        img.SetSpacing((*img.GetSpacing()[:2], 1.0))
+        return img
+
+
+def resample_isotropic(img, spacing=(1.0, 1.0, 1.0)):
+    orig_spacing = img.GetSpacing()
+    orig_size = img.GetSize()
+
+    new_size = [
+        int(round(sz * sp / nsp))
+        for sz, sp, nsp in zip(orig_size, orig_spacing, spacing)
+    ]
+
+    res = sitk.ResampleImageFilter()
+    res.SetInterpolator(sitk.sitkLinear)
+    res.SetOutputSpacing(spacing)
+    res.SetSize(new_size)
+    res.SetOutputDirection(img.GetDirection())
+    res.SetOutputOrigin(img.GetOrigin())
+
+    return res.Execute(img)
+
+# ======================================================
 # CONVERSÃO
 # ======================================================
-
 def convert_exam(local_exam_dir, local_nifti_dir):
     dicomdir_path = os.path.join(local_exam_dir, "DICOMDIR")
-
     if not os.path.exists(dicomdir_path):
         log.error("❌ DICOMDIR não encontrado")
         return False
@@ -100,23 +149,17 @@ def convert_exam(local_exam_dir, local_nifti_dir):
     fs = FileSet(dicomdir_path)
     series_map = defaultdict(list)
 
-    # ============================
-    # DISCOVERY REAL DAS IMAGENS
-    # ============================
+    # DISCOVERY REAL VIA DICOMDIR
     for rec in fs:
         if rec.DirectoryRecordType != "IMAGE":
             continue
-
-        dcm_path = rec.path
         try:
+            dcm_path = rec.path
             ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
+            sid = ds.SeriesInstanceUID
+            series_map[sid].append(dcm_path)
         except Exception:
             continue
-
-        if "SeriesInstanceUID" not in ds:
-            continue
-
-        series_map[ds.SeriesInstanceUID].append(dcm_path)
 
     if not series_map:
         log.warning("⛔ Nenhuma série encontrada via DICOMDIR")
@@ -125,22 +168,25 @@ def convert_exam(local_exam_dir, local_nifti_dir):
     os.makedirs(local_nifti_dir, exist_ok=True)
     converted_any = False
 
-    # ============================
-    # CONVERSÃO
-    # ============================
     for uid, files in series_map.items():
         if len(files) < config.MIN_SLICES:
             continue
 
+        t0 = time.time()
         try:
-            reader = sitk.ImageSeriesReader()
-            reader.SetFileNames(files)
-            img = reader.Execute()
+            files = sorted(files, key=z_position)
+            img = read_series_safe(files)
+
+            if getattr(config, "RESAMPLE_ISOTROPIC", False):
+                img = resample_isotropic(img, config.TARGET_SPACING)
 
             out = os.path.join(local_nifti_dir, f"{uid}.nii.gz")
             sitk.WriteImage(img, out, True)
 
-            log.info(f"✅ Série convertida: {uid} ({len(files)} slices)")
+            log.info(
+                f"✅ Série convertida: {uid} "
+                f"({len(files)} slices, {time.time()-t0:.1f}s)"
+            )
             converted_any = True
 
         except Exception as e:
@@ -148,14 +194,12 @@ def convert_exam(local_exam_dir, local_nifti_dir):
 
     return converted_any
 
-
 # ======================================================
 # UPLOAD
 # ======================================================
 def upload_exam(local_nifti_dir, exam_id):
     if not os.path.exists(local_nifti_dir):
         return False
-
     if not os.listdir(local_nifti_dir):
         return False
 

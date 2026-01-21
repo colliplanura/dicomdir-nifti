@@ -4,7 +4,7 @@ import os
 # CONFIG
 # ======================================================
 
-GDRIVE_DICOM = "gdrive:Medicina/Doutorado IDOR/Exames/DICOM/AAA3/7"
+GDRIVE_DICOM = "gdrive:Medicina/Doutorado IDOR/Exames/DICOM"
 GDRIVE_NIFTI = "gdrive:Medicina/Doutorado IDOR/Exames/teste/NIfTI"
 
 WORKDIR = os.path.expanduser("~/teste")
