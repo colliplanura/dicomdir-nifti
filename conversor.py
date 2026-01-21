@@ -7,7 +7,10 @@ import threading
 import queue
 import subprocess
 import logging
+from collections import defaultdict
 
+import pydicom
+from pydicom.fileset import FileSet
 import SimpleITK as sitk
 from tqdm import tqdm
 import config
@@ -86,32 +89,65 @@ def download_exam(remote_dicomdir, local_exam_dir):
 # ======================================================
 # CONVERSÃO
 # ======================================================
-def convert_exam(local_exam_dir, local_nifti_dir):
-    reader = sitk.ImageSeriesReader()
-    series_ids = reader.GetGDCMSeriesIDs(local_exam_dir)
 
-    if not series_ids:
-        log.warning("⛔ Nenhuma série DICOM válida encontrada")
+def convert_exam(local_exam_dir, local_nifti_dir):
+    dicomdir_path = os.path.join(local_exam_dir, "DICOMDIR")
+
+    if not os.path.exists(dicomdir_path):
+        log.error("❌ DICOMDIR não encontrado")
+        return False
+
+    fs = FileSet(dicomdir_path)
+    series_map = defaultdict(list)
+
+    # ============================
+    # DISCOVERY REAL DAS IMAGENS
+    # ============================
+    for rec in fs:
+        if rec.DirectoryRecordType != "IMAGE":
+            continue
+
+        dcm_path = rec.path
+        try:
+            ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
+        except Exception:
+            continue
+
+        if "SeriesInstanceUID" not in ds:
+            continue
+
+        series_map[ds.SeriesInstanceUID].append(dcm_path)
+
+    if not series_map:
+        log.warning("⛔ Nenhuma série encontrada via DICOMDIR")
         return False
 
     os.makedirs(local_nifti_dir, exist_ok=True)
-    converted = False
+    converted_any = False
 
-    for sid in series_ids:
-        files = reader.GetGDCMSeriesFileNames(local_exam_dir, sid)
+    # ============================
+    # CONVERSÃO
+    # ============================
+    for uid, files in series_map.items():
         if len(files) < config.MIN_SLICES:
             continue
 
-        reader.SetFileNames(files)
-        img = reader.Execute()
+        try:
+            reader = sitk.ImageSeriesReader()
+            reader.SetFileNames(files)
+            img = reader.Execute()
 
-        out = os.path.join(local_nifti_dir, f"{sid}.nii.gz")
-        sitk.WriteImage(img, out, True)
+            out = os.path.join(local_nifti_dir, f"{uid}.nii.gz")
+            sitk.WriteImage(img, out, True)
 
-        log.info(f"✅ Série convertida: {sid}")
-        converted = True
+            log.info(f"✅ Série convertida: {uid} ({len(files)} slices)")
+            converted_any = True
 
-    return converted
+        except Exception as e:
+            log.error(f"❌ Erro na série {uid}: {e}")
+
+    return converted_any
+
 
 # ======================================================
 # UPLOAD
