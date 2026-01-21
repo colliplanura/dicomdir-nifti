@@ -1,0 +1,21 @@
+import os
+
+# ======================================================
+# CONFIG
+# ======================================================
+
+GDRIVE_DICOM = "gdrive:Medicina/Doutorado IDOR/Exames/DICOM/AAA3"
+GDRIVE_NIFTI = "gdrive:Medicina/Doutorado IDOR/Exames/teste/NIfTI"
+
+WORKDIR = os.path.expanduser("~/teste")
+LOCAL_DICOM = os.path.join(WORKDIR, "dicom")
+LOCAL_NIFTI = os.path.join(WORKDIR, "nifti")
+
+PROGRESS_FILE = os.path.join(WORKDIR, "progress.json")
+REMOTE_INDEX_FILE = os.path.join(WORKDIR, "remote_dicomdirs.json")
+
+MIN_SLICES = 10
+
+DOWNLOAD_THREADS = 2
+CONVERSION_THREADS = 2
+UPLOAD_THREADS = 2
