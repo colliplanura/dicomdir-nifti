@@ -24,7 +24,7 @@ GDRIVE_DICOM = "gdrive:Medicina/Doutorado IDOR/Exames/DICOM"
 
 # Remote destino dos NIFTIs
 # Exemplo: "gdrive:PACS/NIFTI"
-GDRIVE_NIFTI = "gdrive:Medicina/Doutorado IDOR/Exames/teste/NIfTI"
+GDRIVE_NIFTI = "gdrive:Medicina/Doutorado IDOR/Exames/testeMAc/NIfTI"
 
 # ======================================================
 # DIRETÓRIOS LOCAIS

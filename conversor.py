@@ -6,6 +6,7 @@ import threading
 import queue
 import subprocess
 import logging
+import shutil
 from collections import defaultdict
 
 import pydicom
@@ -252,6 +253,11 @@ def worker(q, progress):
 # MAIN
 # ======================================================
 def run():
+    # check external dependency
+    if shutil.which("rclone") is None:
+        log.error("rclone não encontrado. Instale o rclone e certifique-se de que está no PATH.")
+        raise SystemExit(1)
+
     os.makedirs(config.LOCAL_DICOM, exist_ok=True)
     os.makedirs(config.LOCAL_NIFTI, exist_ok=True)
 
